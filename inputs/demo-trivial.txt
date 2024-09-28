@@ -1,0 +1,5 @@
+# This is an input file from the README.  It's also in ./inputs/demo-trivial.txt.
+c1: SELECT NOW();
+c2: SELECT NOW();
+c1: SELECT pg_sleep(1);
+c1: SELECT NOW();

@@ -1,0 +1,12 @@
+[package]
+name = "sqldance"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.89"
+chrono = "0.4.38"
+newtype_derive = "0.1.6"
+postgres = { version = "0.19.9", features = ["with-chrono-0_4"] }
+slog-error-chain = { git = "https://github.com/oxidecomputer/slog-error-chain", branch = "main"}
+tabled = "0.16.0"

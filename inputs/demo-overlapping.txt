@@ -1,0 +1,37 @@
+# This is the input file from the README.  It's also in
+# ./inputs/demo-overlapping.txt.
+
+# Clean up from last time.
+setup: DROP TABLE IF EXISTS t1;
+setup: CREATE TABLE t1 (v INT);
+setup: INSERT INTO t1 VALUES (1);
+
+# Simulate a situation where two transactions are both doing this:
+#
+# 1. Check the highest value in `t1`.
+# 2. Insert a new value one larger than that.
+#
+# This looks like:
+#
+#     BEGIN;
+#     SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+#     INSERT INTO t1 VALUES (2);  /* because they will both see "1" */
+#     COMMIT;
+#
+# However, we want to intersperse them in time so that each one's SELECT sees
+# the same value, 1, and so they both attempt to insert 2.  What will happen?
+#
+# The commands below use indentation to visually distinguish c2's queries from
+# c1's, but that's just for you.  sqldance uses the connection id to figure out
+# what connection to run each query on, not whitespace.
+c1: BEGIN;
+c1: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2:         BEGIN;
+c2:         SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2:         INSERT INTO t1 VALUES (2);
+c2:         COMMIT;
+c1: INSERT INTO t1 VALUES (2);
+c1: COMMIT;
+
+# Report the final results.
+setup: SELECT * from t1;

@@ -1,0 +1,263 @@
+//! sqldance: choreograph SQL statements over several connections
+//!
+//! See README for details.
+
+// XXX-dap TODO
+// - colors
+// - fix DB URL weird format
+// - be able to move on when one query hangs
+// - mode that single-steps anyway
+
+use anyhow::{bail, Context};
+use newtype_derive::{NewtypeDeref, NewtypeFrom};
+use postgres::{types::Type, NoTls};
+use slog_error_chain::InlineErrorChain;
+use std::collections::BTreeMap;
+
+fn main() {
+    let args: Vec<_> = std::env::args().collect();
+    if args.len() != 3 {
+        eprintln!(
+            "usage: {} DB_URL FILE_NAME",
+            args.get(0).map(|s| s.as_str()).unwrap_or("sqldance")
+        );
+        std::process::exit(2);
+    }
+
+    if let Err(error) = sqldance(&args[1], &args[2]) {
+        eprintln!("error: {:#}", error);
+        std::process::exit(1);
+    }
+}
+
+/// Runs the `sqldance` command using the given database params and input file
+fn sqldance(db_url: &str, file_name: &str) -> anyhow::Result<()> {
+    let file_contents = std::fs::read_to_string(file_name)
+        .with_context(|| format!("reading {:?}", file_name))?;
+    let commands = parse_commands(&file_contents)
+        .with_context(|| format!("parse {:?}", file_name))?;
+    let mut dance = Sqldance::new(&commands, db_url)?;
+    for cmd in &commands {
+        dance.run_one(cmd);
+    }
+
+    Ok(())
+}
+
+/// User-defined identifier for a connection (newtype around a `String`)
+#[derive(Clone, Debug, Ord, PartialOrd, Eq, PartialEq)]
+struct ConnId(String);
+NewtypeFrom! { () struct ConnId(String); }
+NewtypeDeref! { () struct ConnId(String); }
+
+/// Describes one SQL query to execute using a specific connection
+struct Command {
+    /// which connection
+    conn_id: ConnId,
+    /// what command to execute
+    sql: String,
+}
+
+/// Given the contents of an input file, parse out the sequence of commands
+fn parse_commands(file_contents: &str) -> anyhow::Result<Vec<Command>> {
+    let mut rv = Vec::new();
+    #[derive(Debug, Eq, PartialEq)]
+    enum ParseState {
+        Init,
+        ExpectCommandOrContinuation { conn_id: ConnId, sql: String },
+    }
+    let mut parse_state = ParseState::Init;
+    for (i, line) in file_contents.lines().enumerate() {
+        let line_num = i + 1;
+        if let ParseState::ExpectCommandOrContinuation { conn_id, sql } =
+            parse_state
+        {
+            if line.starts_with(|s: char| s.is_whitespace()) {
+                parse_state = ParseState::ExpectCommandOrContinuation {
+                    conn_id,
+                    sql: format!("{}\n{}", sql, line),
+                };
+                continue;
+            }
+
+            rv.push(Command { conn_id, sql });
+            parse_state = ParseState::Init;
+        }
+
+        assert_eq!(ParseState::Init, parse_state);
+        if line.starts_with("#") {
+            continue;
+        }
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut parts = line.splitn(2, ":");
+        match (parts.next(), parts.next()) {
+            (None, n) => {
+                assert_eq!(n, None);
+                bail!("line {}: garbled", line_num);
+            }
+            (Some(_), None) => {
+                bail!("line {}: expected ':'", line_num);
+            }
+            (Some(conn_id), Some(sql)) => {
+                parse_state = ParseState::ExpectCommandOrContinuation {
+                    conn_id: ConnId::from(conn_id.to_owned()),
+                    sql: sql.trim().to_owned(),
+                };
+            }
+        };
+    }
+
+    if let ParseState::ExpectCommandOrContinuation { conn_id, sql } =
+        parse_state
+    {
+        rv.push(Command { conn_id, sql });
+    }
+
+    Ok(rv)
+}
+
+/// Tracks information associated with the user-defined connections
+struct Sqldance {
+    conns: BTreeMap<ConnId, Connection>,
+}
+
+impl Sqldance {
+    /// Identify distinct connection ids referenced in `commands` and create a
+    /// database connection for each one
+    fn new(commands: &[Command], db_url: &str) -> anyhow::Result<Sqldance> {
+        let mut conns = BTreeMap::new();
+        for c in commands {
+            let conn_id = &c.conn_id;
+            if conns.contains_key(conn_id) {
+                continue;
+            }
+
+            let label = conn_id.to_string();
+            eprint!("conn {:?}: connecting to {} ... ", label, db_url);
+            let client = postgres::Client::connect(db_url, NoTls)
+                .with_context(|| {
+                    format!("connecting to database {:?}", db_url)
+                })?;
+            eprintln!("connected");
+            conns.insert(conn_id.clone(), Connection { label, client });
+        }
+
+        Ok(Sqldance { conns })
+    }
+
+    /// Run one command from the input file and print the results
+    fn run_one(&mut self, cmd: &Command) {
+        let conn = self.conns.get_mut(&cmd.conn_id).unwrap_or_else(|| {
+            panic!("internal error: no connection for {:?}", cmd.conn_id)
+        });
+        conn.query_start(&cmd.sql);
+        let client = &mut conn.client;
+        match client.query(&cmd.sql, &[]) {
+            Ok(rows) => {
+                conn.query_rows(rows);
+            }
+            Err(error) => {
+                conn.query_error(error);
+            }
+        }
+        println!("");
+    }
+}
+
+/// Describes a distinct connection
+struct Connection {
+    /// user's name for this connection
+    label: String,
+    /// database connection
+    client: postgres::Client,
+}
+
+impl Connection {
+    /// Report that we're about to start running SQL
+    fn query_start(&self, sql: &str) {
+        println!("conn {:?}: executing: {:?}", self.label, sql);
+    }
+
+    /// Report the results of a successful query
+    fn query_rows(&self, rows: Vec<postgres::Row>) {
+        println!(
+            "conn {:?}: success (rows returned: {})",
+            self.label,
+            rows.len()
+        );
+
+        if rows.is_empty() {
+            return;
+        }
+
+        let column_names: Vec<_> =
+            rows[0].columns().iter().map(|c| c.name().to_owned()).collect();
+        let mut table_rows = Vec::with_capacity(rows.len() + 1);
+        table_rows.push(column_names);
+        for row in rows {
+            let mut table_row = Vec::with_capacity(row.columns().len());
+            for (i, c) in row.columns().iter().enumerate() {
+                table_row.push(sql_render(&row, i, c.type_()));
+            }
+            table_rows.push(table_row);
+        }
+
+        let mut table = tabled::Table::from_iter(table_rows);
+        table
+            .with(tabled::settings::Style::modern())
+            .with(tabled::settings::Padding::new(1, 1, 0, 0));
+        println!("{}", table);
+    }
+
+    /// Report a failed query
+    fn query_error(&self, error: postgres::Error) {
+        println!(
+            "conn {:?}: error: {}",
+            self.label,
+            InlineErrorChain::new(&error)
+        );
+    }
+}
+
+/// Renders one cell in a table describing a result set
+///
+/// * `row` is the SQL row
+/// * `idx` is the index into that row
+/// * `sql_type` is the type of that column
+fn sql_render(row: &postgres::Row, idx: usize, sql_type: &Type) -> String {
+    // This mapping between SQL types and Rust types comes from the docs for the
+    // `postgres::types::FromSql`, though the types there don't match the
+    // constants in postgres::types::Type.
+    if *sql_type == Type::BOOL {
+        sql_render_value::<bool>(row.try_get(idx))
+    } else if *sql_type == Type::INT8 {
+        sql_render_value::<i64>(row.try_get(idx))
+    } else if *sql_type == Type::INT4 {
+        sql_render_value::<i32>(row.try_get(idx))
+    } else if *sql_type == Type::INT2 {
+        sql_render_value::<i16>(row.try_get(idx))
+    } else if *sql_type == Type::CHAR {
+        sql_render_value::<i8>(row.try_get(idx))
+    } else if *sql_type == Type::TEXT {
+        sql_render_value::<String>(row.try_get(idx))
+    } else if *sql_type == Type::TIMESTAMP || *sql_type == Type::TIMESTAMPTZ {
+        sql_render_value::<chrono::DateTime<chrono::Utc>>(row.try_get(idx))
+    } else {
+        String::from("<unsupported type>")
+    }
+}
+
+/// Renders one Rust value that we tried to convert from its SQL value
+///
+/// This is a separate function for convenience because the caller can easily
+/// specify what Rust type they want to use to convert the value.
+fn sql_render_value<T: ToString>(t: Result<T, postgres::Error>) -> String {
+    match t {
+        Ok(t) => t.to_string(),
+        Err(e) => format!("<bad conversion: {}>", InlineErrorChain::new(&e)),
+    }
+}

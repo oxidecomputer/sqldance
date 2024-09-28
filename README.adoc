@@ -1,0 +1,220 @@
+= sqldance: choreograph SQL statements over several connections
+
+== Synopsis
+
+```
+usage: sqldance DB_CONN_STR INPUT_FILE
+```
+
+`DB_CONN_STR` is a https://docs.rs/tokio-postgres/0.7.12/tokio_postgres/config/struct.Config.html[PostgreSQL URL or connection parameter string].
+
+`INPUT_FILE` is described below.
+
+== Quick start
+
+Assuming you've got CockroachDB installed locally, you can start a PostgreSQL-compatible database with `cockroach demo --insecure`:
+
+[source,console]
+----
+$ cockroach demo --insecure
+...
+# Welcome to the CockroachDB demo database!
+#
+# You are connected to a temporary, in-memory CockroachDB cluster of 1 node.
+...
+# If you wish to access this demo cluster using another tool, you will need
+# the following details:
+#
+#   - Connection parameters:
+#     (webui)    http://127.0.0.1:8080
+#     (sql)      postgresql://root@127.0.0.1:26257/movr?sslmode=disable
+...
+root@127.0.0.1:26257/movr> 
+----
+
+You'll pass the URL it spits out as the `DB_CONN_STR` argument to `sqldance`.
+
+For the `INPUT_FILE`, you can start with the demo one at `inputs/demo-trivial.txt`.  It looks like this:
+
+[source,text]
+----
+# This is an input file from the README.  It's also in ./inputs/demo-trivial.txt.
+c1: SELECT NOW();
+c2: SELECT NOW();
+c1: SELECT pg_sleep(1);
+c1: SELECT NOW();
+----
+
+Run `sqldance` like this:
+
+[source,console]
+----
+$ cargo run -- 'postgresql://root@127.0.0.1:26257/movr?sslmode=disable' inputs/demo-trivial.txt
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running `target/debug/sqldance 'postgresql://root@127.0.0.1:26257/movr?sslmode=disable' inputs/demo-trivial.txt`
+conn "c1": connecting to postgresql://root@127.0.0.1:26257/movr?sslmode=disable ... connected
+conn "c2": connecting to postgresql://root@127.0.0.1:26257/movr?sslmode=disable ... connected
+conn "c1": executing: "SELECT NOW();"
+conn "c1": success (rows returned: 1)
+┌────────────────────────────────┐
+│ now                            │
+├────────────────────────────────┤
+│ 2024-09-28 04:57:30.580148 UTC │
+└────────────────────────────────┘
+
+conn "c2": executing: "SELECT NOW();"
+conn "c2": success (rows returned: 1)
+┌────────────────────────────────┐
+│ now                            │
+├────────────────────────────────┤
+│ 2024-09-28 04:57:30.581991 UTC │
+└────────────────────────────────┘
+
+conn "c1": executing: "SELECT pg_sleep(1);"
+conn "c1": success (rows returned: 1)
+┌──────────┐
+│ pg_sleep │
+├──────────┤
+│ true     │
+└──────────┘
+
+conn "c1": executing: "SELECT NOW();"
+conn "c1": success (rows returned: 1)
+┌────────────────────────────────┐
+│ now                            │
+├────────────────────────────────┤
+│ 2024-09-28 04:57:31.588726 UTC │
+└────────────────────────────────┘
+----
+
+Okay, but why?  Read on.
+
+== Description
+
+sqldance uses multiple connections to runs SQL queries against a PostgreSQL-compatible database.  You provide a file that specifies which queries to run from which connection.  The intent is really to run *transactions* concurrently, overlapping, where you can control the precise sequence of queries that get executed.
+
+Here's a more interesting example:
+
+[source,text]
+----
+# This is the input file from the README.  It's also in
+# ./inputs/demo-overlapping.txt.
+
+# Clean up from last time.
+setup: DROP TABLE IF EXISTS t1;
+setup: CREATE TABLE t1 (v INT);
+setup: INSERT INTO t1 VALUES (1);
+
+# Simulate a situation where two transactions are both doing this:
+#
+# 1. Check the highest value in `t1`.
+# 2. Insert a new value one larger than that.
+#
+# This looks like:
+#
+#     BEGIN;
+#     SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+#     INSERT INTO t1 VALUES (2);  /* because they will both see "1" */
+#     COMMIT;
+#
+# However, we want to intersperse them in time so that each one's SELECT sees
+# the same value, 1, and so they both attempt to insert 2.  What will happen?
+#
+# The commands below use indentation to visually distinguish c2's queries from
+# c1's, but that's just for you.  sqldance uses the connection id to figure out
+# what connection to run each query on, not whitespace.
+c1: BEGIN;
+c1: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2:         BEGIN;
+c2:         SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2:         INSERT INTO t1 VALUES (2);
+c2:         COMMIT;
+c1: INSERT INTO t1 VALUES (2);
+c1: COMMIT;
+
+# Report the final results.
+setup: SELECT * from t1;
+----
+
+Here, the tokens "setup", "c1", and "c2" are **connection identifiers**.  These can be any names you want.  You create a new one by just using them.  `sqldance` will create one database connection for each identifier that it finds.
+
+When given this file, `sqldance` will start by creating three database connections (one for each identifier).  Then it will run each SQL statement in order on the corresponding connection and print the results.  That's all it does.
+
+Here's what it looks like with this example:
+
+[source,text]
+----
+$ cargo run -- 'postgresql://root@127.0.0.1:26257/movr?sslmode=disable' inputs/demo-overlapping.txt
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `target/debug/sqldance 'postgresql://root@127.0.0.1:26257/movr?sslmode=disable' inputs/demo-overlapping.txt`
+conn "setup": connecting to postgresql://root@127.0.0.1:26257/movr?sslmode=disable ... connected
+conn "c1": connecting to postgresql://root@127.0.0.1:26257/movr?sslmode=disable ... connected
+conn "c2": connecting to postgresql://root@127.0.0.1:26257/movr?sslmode=disable ... connected
+conn "setup": executing: "DROP TABLE IF EXISTS t1;"
+conn "setup": success (rows returned: 0)
+
+conn "setup": executing: "CREATE TABLE t1 (v INT);"
+conn "setup": success (rows returned: 0)
+
+conn "setup": executing: "INSERT INTO t1 VALUES (1);"
+conn "setup": success (rows returned: 0)
+
+conn "c1": executing: "BEGIN;"
+conn "c1": success (rows returned: 0)
+
+conn "c1": executing: "SELECT * FROM t1 ORDER BY v DESC LIMIT 1;"
+conn "c1": success (rows returned: 1)
+┌───┐
+│ v │
+├───┤
+│ 1 │
+└───┘
+
+conn "c2": executing: "BEGIN;"
+conn "c2": success (rows returned: 0)
+
+conn "c2": executing: "SELECT * FROM t1 ORDER BY v DESC LIMIT 1;"
+conn "c2": success (rows returned: 1)
+┌───┐
+│ v │
+├───┤
+│ 1 │
+└───┘
+
+conn "c2": executing: "INSERT INTO t1 VALUES (2);"
+conn "c2": success (rows returned: 0)
+
+conn "c2": executing: "COMMIT;"
+conn "c2": success (rows returned: 0)
+
+conn "c1": executing: "INSERT INTO t1 VALUES (2);"
+conn "c1": success (rows returned: 0)
+
+conn "c1": executing: "COMMIT;"
+conn "c1": error: db error: ERROR: restart transaction: TransactionRetryWithProtoRefreshError: TransactionRetryError: retry txn (RETRY_SERIALIZABLE - failed preemptive refresh due to encountered recently written committed value /Table/136/1/1007384436340785153/0 @1727499732.377047000,0): "sql txn" meta={id=b4d69c60 key=/Table/136/1/1007384436349239297/0 iso=Serializable pri=0.00479659 epo=0 ts=1727499732.377047000,1 min=1727499732.374007000,0 seq=1} lock=true stat=PENDING rts=1727499732.374007000,0 wto=false gul=1727499732.874007000,0
+HINT: See: https://www.cockroachlabs.com/docs/v23.2/transaction-retry-error-reference.html#retry_serializable: ERROR: restart transaction: TransactionRetryWithProtoRefreshError: TransactionRetryError: retry txn (RETRY_SERIALIZABLE - failed preemptive refresh due to encountered recently written committed value /Table/136/1/1007384436340785153/0 @1727499732.377047000,0): "sql txn" meta={id=b4d69c60 key=/Table/136/1/1007384436349239297/0 iso=Serializable pri=0.00479659 epo=0 ts=1727499732.377047000,1 min=1727499732.374007000,0 seq=1} lock=true stat=PENDING rts=1727499732.374007000,0 wto=false gul=1727499732.874007000,0
+HINT: See: https://www.cockroachlabs.com/docs/v23.2/transaction-retry-error-reference.html#retry_serializable
+
+conn "setup": executing: "SELECT * from t1;"
+conn "setup": success (rows returned: 2)
+┌───┐
+│ v │
+├───┤
+│ 1 │
+├───┤
+│ 2 │
+└───┘
+
+----
+
+This is kind of interesting: the database (at least, CockroachDB) will not allow these two transactions to both complete because that would violate serializeability.
+
+In summary, you can use `sqldance` to experiment with various interleaving of all kinds of transactions.
+
+== File format
+
+The input file is a sequence of commands of the form `<conn_id>:<SQL>`.
+
+`<conn_id>` is any string _not_ containing a newline or ':'.  `<SQL>` is any text.  The SQL statement may continue onto the next line provided that the next line starts with whitespace.  The next line that starts with a non-whitespace character is treated as a new command.
+
+Blank lines and lines starting with '#' are ignored.

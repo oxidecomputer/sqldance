@@ -1,0 +1,71 @@
+setup: DROP TABLE t1;
+setup: CREATE TABLE t1 (v INT);
+setup: INSERT INTO t1 VALUES (1);
+
+# Simulate two clients in parallel running this transaction:
+#
+#     BEGIN;
+#     SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+#     INSERT INTO t1 VALUES (2);
+#     COMMIT;
+#
+# In this version, c2 is going to get in and run the whole transaction after c1
+# has issued the SELECT.
+
+c1: BEGIN;
+c1: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2: BEGIN;
+c2: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2: INSERT INTO t1 VALUES (2);
+c2: COMMIT;
+c1: INSERT INTO t1 VALUES (2);
+c1: COMMIT;
+
+c1: SELECT * FROM t1;
+c2: SELECT * FROM t1;
+
+# Reset things.
+setup: DROP TABLE t1;
+setup: CREATE TABLE t1 (v INT);
+setup: INSERT INTO t1 VALUES (1);
+
+# This time, we'll have c2 just do an INSERT without doing a SELECT first.
+# This is not valid from an application perspective.  In this case, both
+# transactions will commit successfully, having inserted a row.  The database
+# essentially decides that c2 came first.
+
+c1: BEGIN;
+c1: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+c2: INSERT INTO t1 VALUES (2);
+c1: INSERT INTO t1 VALUES (2);
+c1: COMMIT;
+
+c1: SELECT * FROM t1;
+c2: SELECT * FROM t1;
+
+# Reset things.
+setup: DROP TABLE t1;
+setup: CREATE TABLE t1 (v INT);
+setup: INSERT INTO t1 VALUES (1);
+
+# Now let's add a third client that can check on things as they're happening.
+# XXX this one hangs.  Need a way for the tool to deal with this.  I think the
+# way I want that to work is to hit "enter" to move on to the next thing.  This
+# might require switching to async?
+
+#c1: BEGIN;
+#c1: SELECT * FROM t1 ORDER BY v DESC LIMIT 1;
+#c2: INSERT INTO t1 VALUES (2);
+#c1: INSERT INTO t1 VALUES (2);
+#c3: SELECT * from t1;
+#c1: COMMIT;
+#c3: SELECT * from t1;
+
+# Reset things.
+#setup: DROP TABLE t1;
+#setup: CREATE TABLE t1 (v INT);
+#setup: INSERT INTO t1 VALUES (1);
+
+# To make things a little more interesting, let's have the transaction check one
+# table and insert data into another:
+

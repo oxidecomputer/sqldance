@@ -136,7 +136,7 @@ c1: COMMIT;
 setup: SELECT * from t1;
 ----
 
-Here, the tokens "setup", "c1", and "c2" are **connection identifiers**.  These can be any names you want.  You create a new one by just using them.  `sqldance` will create one database connection for each identifier that it finds.
+Here, the tokens "setup", "c1", and "c2" are **connection identifiers**.  These can be any names you want.  You create a new one by just using it in the file.  `sqldance` will create one database connection for each identifier that it finds.
 
 When given this file, `sqldance` will start by creating three database connections (one for each identifier).  Then it will run each SQL statement in order on the corresponding connection and print the results.  That's all it does.
 

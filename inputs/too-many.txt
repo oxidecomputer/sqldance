@@ -1,0 +1,8 @@
+# this file uses too many connections
+c1: SELECT NOW();
+c2: SELECT NOW();
+c3: SELECT NOW();
+c4: SELECT NOW();
+c5: SELECT NOW();
+c6: SELECT NOW();
+c7: SELECT NOW();

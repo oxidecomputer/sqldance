@@ -4,15 +4,24 @@
 
 // XXX-dap TODO
 // - colors
-// - fix DB URL weird format
 // - be able to move on when one query hangs
 // - mode that single-steps anyway
+// - tests
 
 use anyhow::{bail, Context};
 use newtype_derive::{NewtypeDeref, NewtypeFrom};
 use postgres::{types::Type, NoTls};
 use slog_error_chain::InlineErrorChain;
 use std::collections::BTreeMap;
+
+/// Maximum number of connections allowed
+///
+/// This is just for safety.  If someone accidentally gives us garbage input,
+/// let's not overwhelm the database.
+///
+/// Really, who needs more than *six* concurrent transactions to demonstrate
+/// some behavior?
+const MAX_CONNS: usize = 6;
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -134,6 +143,10 @@ impl Sqldance {
             let conn_id = &c.conn_id;
             if conns.contains_key(conn_id) {
                 continue;
+            }
+
+            if conns.len() == MAX_CONNS {
+                bail!("only {:?} connections are allowed", MAX_CONNS);
             }
 
             let label = conn_id.to_string();

@@ -1,0 +1,191 @@
+###########################################################################
+# This example comes from https://github.com/oxidecomputer/omicron/pull/6712.
+# It's one approach to modeling what the DNS update code does.
+#
+# When executed, this results in both c1 and c2 having inserted a row with n =
+# 3.  This violates an application-level invariant that only one row may have
+# that id.  However, the bug here is in the c1 transaction that inserts a new id
+# without checking the current version at all.
+
+setup: DROP TABLE IF EXISTS versions;
+setup: CREATE TABLE versions (id UUID PRIMARY KEY, n INTEGER, name TEXT);
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 1, 'first');
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 2, 'second');
+
+setup: SELECT '----------- direct translation of PR example ------'
+c2: 		BEGIN;
+c2: 		SELECT * FROM versions ORDER BY n DESC LIMIT 1;
+
+c1: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 3, 'outside txn');
+
+c2: 		INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 3, 'inside txn');
+c2: 		COMMIT;
+
+c1: SELECT * FROM versions ORDER BY n ASC
+
+#
+# This is what the DNS update code actually does: each of the concurrent
+# transactions checks the version and, if it matches what they expect, then set
+# the version.  In this case, even when we interleave the transactions, only
+# one can ever succeed.
+#
+setup: DROP TABLE IF EXISTS versions;
+setup: CREATE TABLE versions (id UUID PRIMARY KEY, n INTEGER, name TEXT);
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 1, 'first');
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 2, 'second');
+setup: SELECT '----------- both read-and-write, first interleaving ------'
+c2:         BEGIN;
+c2:         SELECT * FROM versions ORDER BY n DESC LIMIT 1;
+c1: BEGIN;
+c1: SELECT * FROM versions ORDER BY n DESC LIMIT 1;
+c1: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 3, 'c1 wins');
+c1: COMMIT;
+c2:         INSERT INTO versions (id, n, name)
+            VALUES (gen_random_uuid(), 3, 'c2 wins');
+c2:         COMMIT;
+c1: SELECT * FROM versions ORDER BY n ASC
+
+#
+# Let's try a different interleaving.  Before, we had a second transaction come
+# in right after the first transaction did its select.  But what if the order is
+# changed up so that the "interjecting" transaction actually started first?
+#
+setup: DROP TABLE IF EXISTS versions;
+setup: CREATE TABLE versions (id UUID PRIMARY KEY, n INTEGER, name TEXT);
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 1, 'first');
+setup: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 2, 'second');
+setup: SELECT '----------- both read-and-write, second interleaving ------'
+c1: BEGIN;
+c2:         BEGIN;
+c2:         SELECT * FROM versions ORDER BY n DESC LIMIT 1;
+c1: SELECT * FROM versions ORDER BY n DESC LIMIT 1;
+c1: INSERT INTO versions (id, n, name) VALUES (gen_random_uuid(), 3, 'c1 wins');
+c1: COMMIT;
+c2:         INSERT INTO versions (id, n, name)
+            VALUES (gen_random_uuid(), 3, 'c2 wins');
+c2:         COMMIT;
+c1: SELECT * FROM versions ORDER BY n ASC
+
+###########################################################################
+# Now let's look at the blueprint case mentioned in
+# https://github.com/oxidecomputer/omicron/issues/6694#issue-2551470242 and
+# originally from #6229.  In this example, we've got two types of transaction:
+#
+# c1: wants to check some state (is the expected blueprint still the target),
+#     and only if so: go write some other state
+#
+#        BEGIN;
+#        SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+#        INSERT INTO data VALUES (1);
+#        COMMIT;
+#
+# c2: wants to change the checked state.
+#     There are a few variants.  We'll first look at what happens if c2 also checks
+#     the state before clobbering it.
+#
+#        BEGIN;
+#        SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+#        INSERT INTO bp_target (gen) 2;
+#        COMMIT;
+#
+# For clarity we'll use a third connection "c3" to observe state at various
+# points.  In the first example, c3 only observes at the start and end.
+#
+setup: DROP TABLE IF EXISTS bp_target;
+setup: DROP TABLE IF EXISTS data;
+setup: CREATE TABLE bp_target (gen INT);
+setup: INSERT INTO bp_target (gen) VALUES (1);
+setup: CREATE TABLE data (x INT);
+
+setup: SELECT '----------- blueprint: basic ------'
+c3: SELECT * from bp_target;
+c3: SELECT * from data;
+
+c1: BEGIN;
+c1: SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       BEGIN;
+c2:                       SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       INSERT INTO bp_target (gen) VALUES (2);
+c2:                       COMMIT;
+c1: INSERT INTO data VALUES (1);
+c1: COMMIT;
+
+c3: SELECT * from bp_target;
+c3: SELECT * from data;
+
+# In this case, all the transactions succeeded.  This might be considered
+# surprising since c2 changed the current target blueprint while c1 was running.
+# However, this doesn't (yet) demonstrate violation of an application-level
+# invariant.  The invariant is only violated if c1 manages to insert data
+# *after* the target blueprint has changed.  To observe that, we'd need c3
+# to observe a state of the world where the blueprint was generation 2 but there
+# was no data yet in "data".  So let's try that.  There are a few different
+# spots to put the c3 check and we'll try both.
+
+setup: DROP TABLE IF EXISTS bp_target;
+setup: DROP TABLE IF EXISTS data;
+setup: CREATE TABLE bp_target (gen INT);
+setup: INSERT INTO bp_target (gen) VALUES (1);
+setup: CREATE TABLE data (x INT);
+
+setup: SELECT '----------- blueprint: observer in the middle (before c1 write) ------'
+c3: SELECT * from bp_target;
+c3: SELECT * from data;
+
+c1: BEGIN;
+c1: SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       BEGIN;
+c2:                       SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       INSERT INTO bp_target (gen) VALUES (2);
+c2:                       COMMIT;
+# This is the point where we could conceivably see generation 2 but missing data
+# from generation 1.
+c3: SELECT * from bp_target;
+c3: SELECT * from data WHERE x = 2;
+c1: INSERT INTO data VALUES (1);
+c1: COMMIT;
+
+# Good news!  If we try that, then the c1 transaction winds up failing with a
+# serialization error.  This makes sense: c1 cannot complete because we know it
+# must be ordered before c2 (since it saw data that predated c2's change), but
+# after c3 (since c3 saw data before c1's change), but c3 already must be after
+# c2 (since it saw c2's change).
+# 
+# Okay.  Now what if we change it so that c3 only looks for the data after c1
+# has inserted it (but before it commits)?
+
+setup: DROP TABLE IF EXISTS bp_target;
+setup: DROP TABLE IF EXISTS data;
+setup: CREATE TABLE bp_target (gen INT);
+setup: INSERT INTO bp_target (gen) VALUES (1);
+setup: CREATE TABLE data (x INT);
+
+setup: SELECT '----------- blueprint: observer in the middle (after c1 write) ------'
+c3: SELECT * from bp_target;
+c3: SELECT * from data;
+
+c1: BEGIN;
+c1: SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       BEGIN;
+c2:                       SELECT * from bp_target ORDER BY gen DESC LIMIT 1;
+c2:                       INSERT INTO bp_target (gen) VALUES (2);
+c2:                       COMMIT;
+# This is the point where we could conceivably see generation 2 but missing data
+# from generation 1.
+c1: INSERT INTO data VALUES (1);
+c3: SELECT * from bp_target;
+# We have to comment this out because **this query would block**.  In this
+# situation, c1 can potentially still complete successfully, meaning that all
+# three complete successfully.  But only if c3's query happens after c1 commits.
+# That means c3 is going to block until after c1 commits.  And since sqldance
+# only runs one at a time, we're stuck.  (sqldance should grow an ability to
+# skip to the next one.)
+# c3: SELECT * from data WHERE x = 2;
+c1: COMMIT;
+
+#
+# So the good news is that we still haven't managed to observe a world where the
+# invariant is violated.  And to my knowledge, that's not possible:
+# CockroachDB's default SERIALIZABLE isolation level does have the property that
+# for any two transactions t1 and t2, either t1 will be able to see all of t2's
+# writes and t2 will not be able to see any of t1's -- or vice versa.

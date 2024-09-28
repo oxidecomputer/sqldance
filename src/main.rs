@@ -257,6 +257,8 @@ fn sql_render(row: &postgres::Row, idx: usize, sql_type: &Type) -> String {
         sql_render_value::<i8>(row.try_get(idx))
     } else if *sql_type == Type::TEXT {
         sql_render_value::<String>(row.try_get(idx))
+    } else if *sql_type == Type::UUID {
+        sql_render_value::<uuid::Uuid>(row.try_get(idx))
     } else if *sql_type == Type::TIMESTAMP || *sql_type == Type::TIMESTAMPTZ {
         sql_render_value::<chrono::DateTime<chrono::Utc>>(row.try_get(idx))
     } else {

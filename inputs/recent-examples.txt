@@ -183,7 +183,7 @@ c3: SELECT * from data WHERE x = 1;
 c1: COMMIT;
 
 # Now that c1's transaction has been committed, we can confirm that c3 can see
-# the write it performed.
+# the write that c1 performed.
 c3: SELECT * from data WHERE x = 1;
 
 #

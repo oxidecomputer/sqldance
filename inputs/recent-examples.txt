@@ -174,14 +174,17 @@ c2:                       COMMIT;
 # from generation 1.
 c1: INSERT INTO data VALUES (1);
 c3: SELECT * from bp_target;
-# We have to comment this out because **this query would block**.  In this
+# This query **blocks**, and will fail with a statement timeout. In this
 # situation, c1 can potentially still complete successfully, meaning that all
 # three complete successfully.  But only if c3's query happens after c1 commits.
 # That means c3 is going to block until after c1 commits.  And since sqldance
-# only runs one at a time, we're stuck.  (sqldance should grow an ability to
-# skip to the next one.)
-# c3: SELECT * from data WHERE x = 2;
+# only runs one at a time, we're stuck until we time out.
+c3: SELECT * from data WHERE x = 1;
 c1: COMMIT;
+
+# Now that c1's transaction has been committed, we can confirm that c3 can see
+# the write it performed.
+c3: SELECT * from data WHERE x = 1;
 
 #
 # So the good news is that we still haven't managed to observe a world where the

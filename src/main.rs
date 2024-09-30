@@ -9,10 +9,12 @@
 // - tests
 
 use anyhow::{bail, Context};
+use camino::Utf8PathBuf;
+use clap::Parser;
 use newtype_derive::{NewtypeDeref, NewtypeFrom};
-use postgres::{types::Type, NoTls};
+use postgres::{types::Type, GenericClient, NoTls};
 use slog_error_chain::InlineErrorChain;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 /// Maximum number of connections allowed
 ///
@@ -23,29 +25,42 @@ use std::collections::BTreeMap;
 /// some behavior?
 const MAX_CONNS: usize = 6;
 
-fn main() {
-    let args: Vec<_> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!(
-            "usage: {} DB_URL FILE_NAME",
-            args.get(0).map(|s| s.as_str()).unwrap_or("sqldance")
-        );
-        std::process::exit(2);
-    }
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Default `statement_timeout` for connections
+    ///
+    /// Can be overridden within a connection by issuing a `SET
+    /// statement_timeout = N` query.
+    ///
+    /// Set to 0 to disable statement timeouts.
+    #[arg(short = 't', long, default_value_t = 3_000)]
+    statement_timeout_ms: u64,
 
-    if let Err(error) = sqldance(&args[1], &args[2]) {
+    /// URL for database connections
+    db_url: String,
+
+    /// Input filename
+    input_file: Utf8PathBuf,
+}
+
+fn main() {
+    let args = Args::parse();
+
+    if let Err(error) = sqldance(&args) {
         eprintln!("error: {:#}", error);
         std::process::exit(1);
     }
 }
 
 /// Runs the `sqldance` command using the given database params and input file
-fn sqldance(db_url: &str, file_name: &str) -> anyhow::Result<()> {
-    let file_contents = std::fs::read_to_string(file_name)
-        .with_context(|| format!("reading {:?}", file_name))?;
+fn sqldance(args: &Args) -> anyhow::Result<()> {
+    let file_contents = std::fs::read_to_string(&args.input_file)
+        .with_context(|| format!("reading {:?}", args.input_file))?;
     let commands = parse_commands(&file_contents)
-        .with_context(|| format!("parse {:?}", file_name))?;
-    let mut dance = Sqldance::new(&commands, db_url)?;
+        .with_context(|| format!("parse {:?}", args.input_file))?;
+    let statement_timeout = Duration::from_millis(args.statement_timeout_ms);
+    let mut dance = Sqldance::new(&commands, &args.db_url, statement_timeout)?;
     for cmd in &commands {
         dance.run_one(cmd);
     }
@@ -137,7 +152,11 @@ struct Sqldance {
 impl Sqldance {
     /// Identify distinct connection ids referenced in `commands` and create a
     /// database connection for each one
-    fn new(commands: &[Command], db_url: &str) -> anyhow::Result<Sqldance> {
+    fn new(
+        commands: &[Command],
+        db_url: &str,
+        statement_timeout: Duration,
+    ) -> anyhow::Result<Sqldance> {
         let mut conns = BTreeMap::new();
         for c in commands {
             let conn_id = &c.conn_id;
@@ -151,11 +170,22 @@ impl Sqldance {
 
             let label = conn_id.to_string();
             eprint!("conn {:?}: connecting to {} ... ", label, db_url);
-            let client = postgres::Client::connect(db_url, NoTls)
+            let mut client = postgres::Client::connect(db_url, NoTls)
                 .with_context(|| {
                     format!("connecting to database {:?}", db_url)
                 })?;
             eprintln!("connected");
+            client
+                .execute(
+                    "SET statement_timeout = $1",
+                    &[&statement_timeout.as_millis().to_string()],
+                )
+                .with_context(|| {
+                    format!(
+                        "setting statement_timeout to {:?}",
+                        statement_timeout
+                    )
+                })?;
             conns.insert(conn_id.clone(), Connection { label, client });
         }
 
@@ -177,7 +207,7 @@ impl Sqldance {
                 conn.query_error(error);
             }
         }
-        println!("");
+        println!();
     }
 }
 

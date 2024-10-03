@@ -12,7 +12,8 @@ use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
 use clap::Parser;
 use newtype_derive::{NewtypeDeref, NewtypeFrom};
-use postgres::{types::Type, GenericClient, NoTls};
+use owo_colors::{AnsiColors, OwoColorize, Style};
+use postgres::{types::Type, NoTls};
 use slog_error_chain::InlineErrorChain;
 use std::{collections::BTreeMap, time::Duration};
 
@@ -157,6 +158,15 @@ impl Sqldance {
         db_url: &str,
         statement_timeout: Duration,
     ) -> anyhow::Result<Sqldance> {
+        let mut colors = [
+            AnsiColors::Cyan,
+            AnsiColors::Magenta,
+            AnsiColors::Green,
+            AnsiColors::Red,
+            AnsiColors::Yellow,
+        ]
+        .into_iter()
+        .cycle();
         let mut conns = BTreeMap::new();
         for c in commands {
             let conn_id = &c.conn_id;
@@ -186,7 +196,9 @@ impl Sqldance {
                         statement_timeout
                     )
                 })?;
-            conns.insert(conn_id.clone(), Connection { label, client });
+
+            let style = Style::new().color(colors.next().unwrap());
+            conns.insert(conn_id.clone(), Connection { label, client, style });
         }
 
         Ok(Sqldance { conns })
@@ -217,19 +229,25 @@ struct Connection {
     label: String,
     /// database connection
     client: postgres::Client,
+    /// how to format items related to this connection for the terminal
+    style: owo_colors::Style,
 }
 
 impl Connection {
     /// Report that we're about to start running SQL
     fn query_start(&self, sql: &str) {
-        println!("conn {:?}: executing: {:?}", self.label, sql);
+        println!(
+            "conn {:?}: executing: {:?}",
+            self.label.style(self.style.bold()),
+            sql.style(self.style.bold())
+        );
     }
 
     /// Report the results of a successful query
     fn query_rows(&self, rows: Vec<postgres::Row>) {
         println!(
             "conn {:?}: success (rows returned: {})",
-            self.label,
+            self.label.style(self.style.bold()),
             rows.len()
         );
 
@@ -253,15 +271,15 @@ impl Connection {
         table
             .with(tabled::settings::Style::modern())
             .with(tabled::settings::Padding::new(1, 1, 0, 0));
-        println!("{}", table);
+        println!("{}", table.style(self.style));
     }
 
     /// Report a failed query
     fn query_error(&self, error: postgres::Error) {
         println!(
             "conn {:?}: error: {}",
-            self.label,
-            InlineErrorChain::new(&error)
+            self.label.style(self.style),
+            InlineErrorChain::new(&error).style(self.style)
         );
     }
 }

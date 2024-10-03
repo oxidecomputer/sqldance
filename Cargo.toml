@@ -9,6 +9,7 @@ camino = "1.1.9"
 chrono = "0.4.38"
 clap = { version = "4.5.18", features = ["derive"] }
 newtype_derive = "0.1.6"
+owo-colors = "4.1.0"
 postgres = { version = "0.19.9", features = ["with-chrono-0_4", "with-uuid-1"] }
 slog-error-chain = { git = "https://github.com/oxidecomputer/slog-error-chain", branch = "main"}
 tabled = "0.16.0"

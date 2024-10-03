@@ -3,7 +3,6 @@
 //! See README for details.
 
 // XXX-dap TODO
-// - colors
 // - be able to move on when one query hangs
 // - mode that single-steps anyway
 // - tests

@@ -317,9 +317,10 @@ fn sql_render(row: &postgres::Row, idx: usize, sql_type: &Type) -> String {
 ///
 /// This is a separate function for convenience because the caller can easily
 /// specify what Rust type they want to use to convert the value.
-fn sql_render_value<T: ToString>(t: Result<T, postgres::Error>) -> String {
+fn sql_render_value<T: ToString>(t: Result<Option<T>, postgres::Error>) -> String {
     match t {
-        Ok(t) => t.to_string(),
+        Ok(Some(t)) => t.to_string(),
+        Ok(None) => "NULL".to_string(),
         Err(e) => format!("<bad conversion: {}>", InlineErrorChain::new(&e)),
     }
 }

@@ -1,0 +1,10 @@
+# Clean up from last time.
+setup: DROP TABLE IF EXISTS t1;
+setup: CREATE TABLE t1 (v INT);
+
+# Insert both NULL and non-NULL values.
+setup: INSERT INTO t1 VALUES (1);
+setup: INSERT INTO t1 VALUES (NULL);
+
+# Report the final results.
+setup: SELECT * from t1;
